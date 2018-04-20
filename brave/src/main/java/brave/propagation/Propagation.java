@@ -77,6 +77,7 @@ public interface Propagation<K> {
 
   /** Replaces a propagated key with the given value */
   interface Setter<C, K> {
+    // BRAVE4: make this a charsequence as there's no need to allocate a string
     void put(C carrier, K key, String value);
   }
 
