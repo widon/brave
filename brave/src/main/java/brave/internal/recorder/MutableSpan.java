@@ -6,9 +6,7 @@ import brave.internal.IpLiteral;
 import brave.internal.Nullable;
 import brave.propagation.TraceContext;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
-import zipkin2.Span;
 
 /**
  * This represents a span except for its {@link TraceContext}. It is mutable, for late adjustments.
@@ -16,7 +14,16 @@ import zipkin2.Span;
  * <p>While in-flight, the data is synchronized where necessary. When exposed to users, it can be
  * mutated without synchronization.
  */
-public final class MutableSpan {
+public final class MutableSpan implements Cloneable {
+
+  public interface TagConsumer<T> {
+    void accept(T target, String key, String value);
+  }
+
+  public interface AnnotationConsumer<T> {
+    void accept(T target, long timestamp, String value);
+  }
+
   /*
    * One of these objects is allocated for each in-flight span, so we try to be parsimonious on things
    * like array allocation and object reference size.
@@ -31,17 +38,58 @@ public final class MutableSpan {
    * To reduce the amount of allocation, collocate annotations with tags in a pair-indexed list.
    * This will be (startTimestamp, value) for annotations and (key, value) for tags.
    */
-  final List<Object> pairs = new ArrayList<>(6); // assume 3 tags and no annotations
+  final ArrayList<Object> pairs;
 
-  /** @see brave.Span#start(long) */
-  public void startTimestamp(long startTimestamp) {
-    this.startTimestamp = startTimestamp;
+  public MutableSpan() {
+    pairs = new ArrayList<>(6); // assume 3 tags and no annotations
+  }
+
+  MutableSpan(MutableSpan source) {
+    kind = source.kind;
+    shared = source.shared;
+    startTimestamp = source.startTimestamp;
+    finishTimestamp = source.finishTimestamp;
+    name = source.name;
+    remoteServiceName = source.remoteServiceName;
+    remoteIp = source.remoteIp;
+    remotePort = source.remotePort;
+    pairs = (ArrayList<Object>) source.pairs.clone();
+  }
+
+  /** Returns the {@link brave.Span#name(String) span name} or null */
+  @Nullable public String name() {
+    return name;
   }
 
   /** @see brave.Span#name(String) */
   public void name(String name) {
     if (name == null) throw new NullPointerException("name == null");
     this.name = name;
+  }
+
+  /** Returns the {@link brave.Span#start(long) span start timestamp} or zero */
+  public long startTimestamp() {
+    return startTimestamp;
+  }
+
+  /** @see brave.Span#start(long) */
+  public void startTimestamp(long startTimestamp) {
+    this.startTimestamp = startTimestamp;
+  }
+
+  /** Returns the {@link brave.Span#finish(long) span finish timestamp} or zero */
+  public long finishTimestamp() {
+    return finishTimestamp;
+  }
+
+  /** @see brave.Span#finish(long) */
+  public void finishTimestamp(long finishTimestamp) {
+    this.finishTimestamp = finishTimestamp;
+  }
+
+  /** Returns the {@link brave.Span#kind(brave.Span.Kind) span kind} or null */
+  public Kind kind() {
+    return kind;
   }
 
   /** @see brave.Span#kind(brave.Span.Kind) */
@@ -117,6 +165,27 @@ public final class MutableSpan {
     pairs.add(value);
   }
 
+  public <T> void forEachTag(TagConsumer<T> tagConsumer, T target) {
+    for (int i = 0, length = pairs.size(); i < length; i += 2) {
+      Object first = pairs.get(i);
+      if (first instanceof Long) continue; // hit an annotation
+      tagConsumer.accept(target, first.toString(), pairs.get(i + 1).toString());
+    }
+  }
+
+  public <T> void forEachAnnotation(AnnotationConsumer<T> annotationConsumer, T target) {
+    for (int i = 0, length = pairs.size(); i < length; i += 2) {
+      Object first = pairs.get(i);
+      if (first instanceof String) continue; // hit a tag
+      annotationConsumer.accept(target, (Long) first, pairs.get(i + 1).toString());
+    }
+  }
+
+  /** Returns true if the span ID is {@link #setShared() shared} with a remote client. */
+  public boolean shared() {
+    return shared;
+  }
+
   /**
    * Indicates we are contributing to a span started by another tracer (ex on a different host).
    * Defaults to false.
@@ -128,42 +197,8 @@ public final class MutableSpan {
     shared = true;
   }
 
-  /** @see brave.Span#finish(long) */
-  public void finishTimestamp(long finishTimestamp) {
-    this.finishTimestamp = finishTimestamp;
-  }
-
-  // Since this is not exposed, this class could be refactored later as needed to act in a pool
-  // to reduce GC churn. This would involve calling span.clear and resetting the fields below.
-  public void writeTo(zipkin2.Span.Builder result) {
-    result.name(name);
-    if (kind != null && kind.ordinal() < Span.Kind.values().length) { // defend against version skew
-      result.kind(zipkin2.Span.Kind.values()[kind.ordinal()]);
-    }
-    result.timestamp(startTimestamp);
-    if (startTimestamp != 0 && finishTimestamp != 0L) {
-      result.duration(Math.max(finishTimestamp - startTimestamp, 1));
-    }
-    if (remoteIp != null || remoteServiceName != null) {
-      result.remoteEndpoint(zipkin2.Endpoint.newBuilder()
-          .serviceName(remoteServiceName)
-          .ip(remoteIp)
-          .port(remotePort)
-          .build());
-    }
-
-    for (int i = 0, length = pairs.size(); i < length; i += 2) {
-      Object first = pairs.get(i);
-      String second = pairs.get(i + 1).toString();
-      if (first instanceof Long) {
-        result.addAnnotation((Long) first, second);
-      } else {
-        result.putTag(first.toString(), second);
-      }
-    }
-    if (shared) result.shared(true);
-  }
-
-  MutableSpan() { // intentionally hidden
+  /** Returns a result which modifies the data without affecting the source. */
+  @Override public MutableSpan clone() {
+    return new MutableSpan(this);
   }
 }
